@@ -15,10 +15,7 @@ using DuplicateFileDetectorMerge.Models;
 using DuplicateFileDetectorMerge.Services;
 using MessageBox = System.Windows.MessageBox;
 using Window = System.Windows.Window;
-using System.IO;
 using System.Threading.Tasks;
-using CoenM.ImageHash;
-using CoenM.ImageHash.HashAlgorithms;
 
 namespace DuplicateFileDetectorMerge;
 
@@ -37,12 +34,13 @@ public partial class MainWindow : Window
     private string? compareToFolder;
     private string? compareFromFolder;
 
-    // Initialize the hashing algorithm once (PerceptualHash is robust for edits/resizes)
-
-
     public MainWindow()
     {
         InitializeComponent();
+
+        ComparisonActivity.Started += ShowCurrentComparison;
+        ComparisonActivity.Ended += HideCurrentComparison;
+        AppLog.MessageLogged += AppendLog;
 
         compareToFolder = @"H:\MediaCenter\Pictures";
         compareFromFolder = @"H:\Pictures";
@@ -215,27 +213,6 @@ public partial class MainWindow : Window
         }
     }
 
-    private static readonly PerceptualHash _hasher = new PerceptualHash();
-
-    // File extensions decodable by ImageSharp's built-in decoders, and therefore supported by PerceptualHash.
-    private static readonly HashSet<string> SupportedPerceptualHashExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".bmp", ".pbm", ".cur", ".jpeg", ".jpg", ".tiff", ".tif", ".gif",
-        ".exr", ".tga", ".ani", ".webp", ".ico", ".png", ".qoi"
-    };
-
-    /// <summary>Returns true if extension (with or without a leading dot) is decodable by PerceptualHash.</summary>
-    private static bool IsPerceptualHashSupported(string extension)
-    {
-        if (string.IsNullOrWhiteSpace(extension))
-        {
-            return false;
-        }
-
-        var normalized = extension.StartsWith('.') ? extension : "." + extension;
-        return SupportedPerceptualHashExtensions.Contains(normalized);
-    }
-
     /// <summary>
     /// Searches the class-scoped compareToList for an entry matching searchForElement.
     /// </summary>
@@ -257,58 +234,14 @@ public partial class MainWindow : Window
 
             var sizeMatches = compareToElement.FileSize == searchForElement.FileSize;
 
-            //If the filename and extension match, but the size does not match, perform a more detailed check using perceptual hashing.
-            if (extensionMatches && !sizeMatches)
+            if (!sizeMatches)
             {
-                if (IsPerceptualHashSupported(compareToElement.Extension))
-                {
-                    double fileSizeRatio = (double)compareToElement.FileSize / searchForElement.FileSize;
-                    //This range is arbitrary and allows for a very small difference in file sizes.
-                    //Note that the < 1 and > 1 bounds relate to how the from file could be slightly smaller or larger than the compareTo file.
-                    //While the metadata of the file can be different, the actual content might still be nearly identical.
-                    //The check is done to prevent comparing files that are clearly different in size, which would be unnecessary.
-                    if (0.999 < fileSizeRatio && fileSizeRatio < 1.001) //let's do some magics...
-                    {
-                        //Log a message that the comparison is occuring, listing both files and paths
-                        Console.WriteLine($"Comparing files: {searchForElement.Path}/{searchForElement.FileName}{searchForElement.Extension} and {compareToElement.Path}/{compareToElement.FileName}{compareToElement.Extension}");
-
-                        ShowCurrentComparison(searchForElement, compareToElement);
-
-                        // Consider the files as matching in size within a small tolerance ( using declaration ensures streams are properly disposed )
-                        using var stream1 = File.OpenRead(searchForElement.Path + "/" + searchForElement.FileName + searchForElement.Extension);
-                        using var stream2 = File.OpenRead(compareToElement.Path + "/" + compareToElement.FileName + compareToElement.Extension);
-                        // You can now perform further checks on the streams if needed
-                        // Generate the 64-bit fingerprint fingerprints for both images
-                        ulong hash1 = _hasher.Hash(stream1);
-                        ulong hash2 = _hasher.Hash(stream2);
-
-                        double similarityScore = CompareHash.Similarity(hash1, hash2);
-                        if (similarityScore >= 95.0)
-                        {
-                            sizeMatches = true;
-                        }
-
-                        HideCurrentComparison();
-                    }
-                } else {
-                    LogMismatch(searchForElement, compareToElement, "Extension Not supported by PerceptualHash");
-                    continue;
-                }
+                var handler = ExtensionHandlerRegistry.GetHandlerForExtension(searchForElement.Extension);
+                sizeMatches = handler.AreSimilar(searchForElement, compareToElement);
             }
-            if (extensionMatches && sizeMatches)
-            {
-                // Continue checking the remaining properties; mismatches are logged but do not change isMatched.
-                /*
-                if (compareToElement.DateCreated != searchForElement.DateCreated)
-                {
-                    //LogMismatch(searchForElement, compareToElement, "Date Created");
-                }
 
-                if (compareToElement.DateModified != searchForElement.DateModified)
-                {
-                    //LogMismatch(searchForElement, compareToElement, "Date Modified");
-                }
-                */
+            if (sizeMatches)
+            {
                 return true;
             }
         }
@@ -323,33 +256,19 @@ public partial class MainWindow : Window
         Log(message);
     }
 
-    private static void ShowCurrentComparison(ListElement fromElement, ListElement toElement)
+    private void ShowCurrentComparison(ListElement fromElement, ListElement toElement)
     {
-        // Resolve MainWindow inside the dispatched call; Application/MainWindow are thread-affine.
-        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+        Dispatcher.Invoke(() =>
         {
-            var window = System.Windows.Application.Current?.MainWindow as MainWindow;
-            if (window is null)
-            {
-                return;
-            }
-
-            window.CompareFromCurrentText.Text = $"Compare From: {fromElement.FileName}{fromElement.Extension} | Path={fromElement.Path}";
-            window.CompareToCurrentText.Text = $"Compare To: {toElement.FileName}{toElement.Extension} | Path={toElement.Path}";
-            window.CurrentComparisonPanel.Visibility = Visibility.Visible;
+            CompareFromCurrentText.Text = $"Compare From: {fromElement.FileName}{fromElement.Extension} | Path={fromElement.Path}";
+            CompareToCurrentText.Text = $"Compare To: {toElement.FileName}{toElement.Extension} | Path={toElement.Path}";
+            CurrentComparisonPanel.Visibility = Visibility.Visible;
         });
     }
 
-    private static void HideCurrentComparison()
+    private void HideCurrentComparison()
     {
-        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
-        {
-            var window = System.Windows.Application.Current?.MainWindow as MainWindow;
-            if (window is not null)
-            {
-                window.CurrentComparisonPanel.Visibility = Visibility.Collapsed;
-            }
-        });
+        Dispatcher.Invoke(() => CurrentComparisonPanel.Visibility = Visibility.Collapsed);
     }
 
     private void PrintResults()
@@ -367,14 +286,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void Log(string message)
-    {
-        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
-        {
-            var window = System.Windows.Application.Current?.MainWindow as MainWindow;
-            window?.AppendLog(message);
-        });
-    }
+    private static void Log(string message) => AppLog.Log(message);
 
     private void AppendLog(string message)
     {
