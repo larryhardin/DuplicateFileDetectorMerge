@@ -1,0 +1,12 @@
+tmp/*
+sixlabors.lic
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET build output
+[Bb]in/
+[Oo]bj/
